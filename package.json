@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@neondatabase/neon-js": "^0.5.0-beta",
+    "zod": "^4.4.3"
+  }
+}
