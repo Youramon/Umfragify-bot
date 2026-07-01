@@ -332,7 +332,9 @@ const getServer = () => {
 };
 
 // Nutze die offizielle Factory-Funktion für die Express App
-const app = createMcpExpressApp();
+const app = createMcpExpressApp({
+  allowedHosts: ["localhost", "umfragify-bot.onrender.com"]
+});
 
 app.post("/mcp", async (req: Request, res: Response) => {
   const server = getServer();
