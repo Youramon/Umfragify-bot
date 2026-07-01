@@ -264,6 +264,69 @@ const getServer = () => {
       }
     },
   )
+  server.registerTool(
+  "sync-answer-analysis",
+  {
+    description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext.",
+    inputSchema: z.object({
+      questionId: z.number().describe("Die ID der aktuellen Frage"),
+      matchedCategoryIds: z.array(z.number()).describe("IDs bereits existierender Kategorien"),
+      newCategoryLabels: z.array(z.string()).describe("Labels für komplett neue Kategorien"),
+      rawResponse: z.string().describe("Der originale Text des Nutzers")
+    })
+  },
+  async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse }): Promise<CallToolResult> => {
+    try {
+  // Neon erwartet, dass wir die SQL-Queries direkt als Array ausführen 
+  // oder die Abfragen synchron aneinanderketten.
+  await sql.transaction((tx) => {
+    const queries = [];
+
+    // 1. Rohtext loggen
+    queries.push(
+      tx`INSERT INTO raw_responses (question_id, text) VALUES (${questionId}, ${rawResponse})`
+    );
+
+    // 2. Bestehende inkrementieren
+    if (matchedCategoryIds.length > 0) {
+      queries.push(
+        tx`UPDATE categories SET counter = counter + 1 WHERE id = ANY(${matchedCategoryIds})`
+      );
+    }
+
+    // 3. Neue Kategorien anlegen
+    for (const label of newCategoryLabels) {
+      queries.push(
+        tx`
+          INSERT INTO categories (question_id, label, counter)
+          VALUES (${questionId}, ${label}, 1)
+          ON CONFLICT (question_id, label) 
+          DO UPDATE SET counter = categories.counter + 1
+        `
+      );
+    }
+
+    // Wir geben das Array an Queries zurück, das Neon dann atomar ausführt
+    return queries;
+  });
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          status: "success",
+          message: "Analyse erfolgreich synchronisiert.",
+        }, null, 2),
+      },
+    ],
+  };
+} catch (error) {
+  // ... dein bestehender catch-Block catch (error) {
+      return { isError: true, content: [{ type: "text", text: String(error) }] };
+    }
+  }
+);
 
   return server;
 };
