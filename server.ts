@@ -122,7 +122,7 @@ const getServer = () => {
           SET counter = counter + 1
           WHERE id = ANY(${categoryIds});
         `;
-        
+
         return {
           content: [
             {
@@ -233,7 +233,7 @@ const getServer = () => {
           VALUES (${questionId}, ${label}, ${initialCounter})
           RETURNING id;
         `;
-        
+
         return {
           content: [
             {
@@ -265,72 +265,160 @@ const getServer = () => {
     },
   )
   server.registerTool(
-  "sync-answer-analysis",
-  {
-    description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext. Verwende dieses Tool primär, um Antworten aufzuzeichnen. Andere Tools wie 'submit-answer' oder 'add-category' sind eher als Fallback gedacht falls dieses Tool nicht funktionieren sollte.",
-    inputSchema: z.object({
-      questionId: z.number().describe("Die ID der aktuellen Frage"),
-      matchedCategoryIds: z.array(z.number()).default([]).describe("IDs bereits existierender Kategorien"),
-      newCategoryLabels: z.array(z.string()).default([]).describe("Labels für komplett neue Kategorien"),
-      rawResponse: z.string().describe("Der originale Text des Nutzers")
-    })
-  },
-  async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse }): Promise<CallToolResult> => {
-    try {
-  // Neon erwartet, dass wir die SQL-Queries direkt als Array ausführen 
-  // oder die Abfragen synchron aneinanderketten.
-  await sql.transaction((tx) => {
-    const queries = [];
+    "sync-answer-analysis",
+    {
+      description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext inklusive semantischem Vektor.",
+      inputSchema: z.object({
+        questionId: z.number().describe("Die ID der aktuellen Frage"),
+        matchedCategoryIds: z.array(z.number()).default([]).describe("IDs bereits existierender Kategorien"),
+        newCategoryLabels: z.array(z.string()).default([]).describe("Labels für komplett neue Kategorien"),
+        rawResponse: z.string().describe("Der originale Text des Nutzers")
+      })
+    },
+    async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse }): Promise<CallToolResult> => {
+      try {
+        // 1. Vektor via Hugging Face API generieren
+        let embeddingVector: number[] | null = null;
+        try {
+          const response = await fetch(
+            "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${process.env.HF_TOKEN}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ inputs: rawResponse }),
+            }
+          );
 
-    // 1. Rohtext loggen
-    queries.push(
-      tx`INSERT INTO raw_responses (question_id, text) VALUES (${questionId}, ${rawResponse})`
-    );
+          if (response.ok) {
+            embeddingVector = await response.json() as number[];
+          } else {
+            console.error("Hugging Face API Fehler:", response.statusText);
+          }
+        } catch (hfError) {
+          console.error("Embedding-Generierung fehlgeschlagen:", hfError);
+        }
 
-    // 2. Bestehende inkrementieren
-    if (matchedCategoryIds.length > 0) {
-      queries.push(
-        tx`UPDATE categories SET counter = counter + 1 WHERE id = ANY(${matchedCategoryIds})`
-      );
+        // 2. Transaktion an Neon DB senden
+        await sql.transaction((tx) => {
+          const queries = [];
+
+          // Rohtext MIT Vektor loggen (falls Vektor-Generierung erfolgreich war)
+          if (embeddingVector) {
+            queries.push(
+              tx`INSERT INTO raw_responses (question_id, text, embedding) VALUES (${questionId}, ${rawResponse}, ${JSON.stringify(embeddingVector)}::vector)`
+            );
+          } else {
+            queries.push(
+              tx`INSERT INTO raw_responses (question_id, text) VALUES (${questionId}, ${rawResponse})`
+            );
+          }
+
+          // Bestehende inkrementieren
+          if (matchedCategoryIds.length > 0) {
+            queries.push(
+              tx`UPDATE categories SET counter = counter + 1 WHERE id = ANY(${matchedCategoryIds})`
+            );
+          }
+
+          // Neue Kategorien anlegen
+          for (const label of newCategoryLabels) {
+            queries.push(
+              tx`
+                INSERT INTO categories (question_id, label, counter)
+                VALUES (${questionId}, ${label}, 1)
+                ON CONFLICT (question_id, label) 
+                DO UPDATE SET counter = categories.counter + 1
+              `
+            );
+          }
+
+          return queries;
+        });
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ status: "success", message: "Analyse und Embedding erfolgreich synchronisiert." }, null, 2) }],
+        };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: String(error) }] };
+      }
     }
+  );
 
-    // 3. Neue Kategorien anlegen
-    for (const label of newCategoryLabels) {
-      queries.push(
-        tx`
-          INSERT INTO categories (question_id, label, counter)
-          VALUES (${questionId}, ${label}, 1)
-          ON CONFLICT (question_id, label) 
-          DO UPDATE SET counter = categories.counter + 1
-        `
-      );
+  // DAS SEMANTISCHE SUCH-TOOL (sucht nach passenden Zitaten)
+  server.registerTool(
+    "search-raw-responses",
+    {
+      description: "Sucht nach semantisch ähnlichen Nutzerantworten (Zitaten) zu einer Frage anhand eines Text-Suchbegriffs.",
+      inputSchema: z.object({
+        questionId: z.number().describe("Die ID der Frage, zu der die Antworten durchsucht werden sollen"),
+        searchQuery: z.string().describe("Der Textbegriff oder Satz, nach dem semantisch gesucht werden soll (z.B. 'Urlaub in der Karibik')"),
+        limit: z.number().optional().default(5).describe("Maximale Anzahl an Zitaten"),
+      }),
+    },
+    async ({ questionId, searchQuery, limit }): Promise<CallToolResult> => {
+      try {
+        // Suchbegriff ebenfalls in Vektor umwandeln
+        const hfRes = await fetch(
+          "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.HF_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ inputs: searchQuery }),
+          }
+        );
+
+        if (!hfRes.ok) {
+          throw new Error(`Hugging Face API Error: ${hfRes.statusText}`);
+        }
+
+        const queryEmbedding = await hfRes.json() as number[];
+
+        // Vektorsuche in Neon ausführen
+        const result = await sql`
+          SELECT id, text, (embedding <=> ${JSON.stringify(queryEmbedding)}::vector) as distance
+          FROM raw_responses
+          WHERE question_id = ${questionId} AND embedding IS NOT NULL
+          ORDER BY distance ASC
+          LIMIT ${limit};
+        `;
+
+        if (result.length === 0) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ status: "no_results", message: "Keine semantisch passenden Antworten gefunden." }) }],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "success",
+                matches: result.map((r) => ({
+                  id: r.id,
+                  text: r.text,
+                  similarityScore: (1 - r.distance).toFixed(4),
+                })),
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: `Fehler bei Vektorsuche: ${String(error)}` }] };
+      }
     }
+  );
 
-    // Wir geben das Array an Queries zurück, das Neon dann atomar ausführt
-    return queries;
-  });
 
-  return {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          status: "success",
-          message: "Analyse erfolgreich synchronisiert.",
-        }, null, 2),
-      },
-    ],
-  };
-} catch (error) {
-  // ... dein bestehender catch-Block catch (error) {
-      return { isError: true, content: [{ type: "text", text: String(error) }] };
-    }
-  }
-);
-
-server.registerTool(
-  "search-surveys",
-  {
+  server.registerTool(
+    "search-surveys",
+    {
     description:
       "Sucht nach Umfragen (Surveys) anhand eines Textbegriffs im Namen/Titel und gibt die passenden IDs zurück.",
     inputSchema: z.object({
@@ -395,7 +483,7 @@ server.registerTool(
   },
 );
 
-  return server;
+return server;
 };
 
 // Nutze die offizielle Factory-Funktion für die Express App
