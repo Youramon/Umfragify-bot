@@ -328,6 +328,73 @@ const getServer = () => {
   }
 );
 
+server.registerTool(
+  "search-surveys",
+  {
+    description:
+      "Sucht nach Umfragen (Surveys) anhand eines Textbegriffs im Namen/Titel und gibt die passenden IDs zurück.",
+    inputSchema: z.object({
+      searchTerm: z
+        .string()
+        .describe("Der Name oder ein Teil des Titels der Umfrage, nach der gesucht wird (z. B. 'Urlaub')"),
+    }),
+  },
+  async ({ searchTerm }): Promise<CallToolResult> => {
+    try {
+      // %searchTerm% sorgt dafür, dass das Wort überall im Titel stehen kann
+      const result = await sql`
+        SELECT id, name
+        FROM surveys
+        WHERE name ILIKE ${'%' + searchTerm + '%'};
+      `;
+
+      if (result.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "no_results",
+                message: `Keine Umfrage mit dem Begriff "${searchTerm}" gefunden.`,
+              }),
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                status: "success",
+                results: result.map((s) => ({
+                  id: s.id,
+                  name: s.name,
+                })),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Datenbankfehler:", error);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Fehler bei der Umfragesuche: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+      };
+    }
+  },
+);
+
   return server;
 };
 
