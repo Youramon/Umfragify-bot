@@ -267,11 +267,11 @@ const getServer = () => {
   server.registerTool(
   "sync-answer-analysis",
   {
-    description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext.",
+    description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext. Verwende dieses Tool primär, um Antworten aufzuzeichnen. Andere Tools wie 'submit-answer' oder 'add-category' sind eher als Fallback gedacht falls dieses Tool nicht funktionieren sollte.",
     inputSchema: z.object({
       questionId: z.number().describe("Die ID der aktuellen Frage"),
-      matchedCategoryIds: z.array(z.number()).describe("IDs bereits existierender Kategorien"),
-      newCategoryLabels: z.array(z.string()).describe("Labels für komplett neue Kategorien"),
+      matchedCategoryIds: z.array(z.number()).default([]).describe("IDs bereits existierender Kategorien"),
+      newCategoryLabels: z.array(z.string()).default([]).describe("Labels für komplett neue Kategorien"),
       rawResponse: z.string().describe("Der originale Text des Nutzers")
     })
   },
