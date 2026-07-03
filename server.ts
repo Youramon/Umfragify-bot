@@ -281,14 +281,15 @@ const getServer = () => {
         let embeddingVector: number[] | null = null;
         try {
           const response = await fetch(
-            "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
+            "https://108.138.94.52/models/sentence-transformers/all-MiniLM-L6-v2", // Direkte IP von HF
             {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${process.env.HF_TOKEN}`,
                 "Content-Type": "application/json",
+                Host: "api-inference.huggingface.co", // Das ist wichtig, damit die IP weiß, welche Domain sie spiegeln soll
               },
-              body: JSON.stringify({ inputs: rawResponse }),
+              body: JSON.stringify({ inputs: rawResponse }), // bzw. inputs: searchQuery bei der Suche
             }
           );
 
@@ -362,14 +363,15 @@ const getServer = () => {
       try {
         // Suchbegriff ebenfalls in Vektor umwandeln
         const hfRes = await fetch(
-          "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
+          "https://108.138.94.52/models/sentence-transformers/all-MiniLM-L6-v2", // Direkte IP von HF
           {
             method: "POST",
             headers: {
               Authorization: `Bearer ${process.env.HF_TOKEN}`,
               "Content-Type": "application/json",
+              Host: "api-inference.huggingface.co", // Das ist wichtig, damit die IP weiß, welche Domain sie spiegeln soll
             },
-            body: JSON.stringify({ inputs: searchQuery }),
+            body: JSON.stringify({ inputs: searchQuery }), // bzw. inputs: searchQuery bei der Suche
           }
         );
 
@@ -419,71 +421,71 @@ const getServer = () => {
   server.registerTool(
     "search-surveys",
     {
-    description:
-      "Sucht nach Umfragen (Surveys) anhand eines Textbegriffs im Namen/Titel und gibt die passenden IDs zurück.",
-    inputSchema: z.object({
-      searchTerm: z
-        .string()
-        .describe("Der Name oder ein Teil des Titels der Umfrage, nach der gesucht wird (z. B. 'Urlaub')"),
-    }),
-  },
-  async ({ searchTerm }): Promise<CallToolResult> => {
-    try {
-      // %searchTerm% sorgt dafür, dass das Wort überall im Titel stehen kann
-      const result = await sql`
+      description:
+        "Sucht nach Umfragen (Surveys) anhand eines Textbegriffs im Namen/Titel und gibt die passenden IDs zurück.",
+      inputSchema: z.object({
+        searchTerm: z
+          .string()
+          .describe("Der Name oder ein Teil des Titels der Umfrage, nach der gesucht wird (z. B. 'Urlaub')"),
+      }),
+    },
+    async ({ searchTerm }): Promise<CallToolResult> => {
+      try {
+        // %searchTerm% sorgt dafür, dass das Wort überall im Titel stehen kann
+        const result = await sql`
         SELECT id, name
         FROM surveys
         WHERE name ILIKE ${'%' + searchTerm + '%'};
       `;
 
-      if (result.length === 0) {
+        if (result.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "no_results",
+                  message: `Keine Umfrage mit dem Begriff "${searchTerm}" gefunden.`,
+                }),
+              },
+            ],
+          };
+        }
+
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({
-                status: "no_results",
-                message: `Keine Umfrage mit dem Begriff "${searchTerm}" gefunden.`,
-              }),
+              text: JSON.stringify(
+                {
+                  status: "success",
+                  results: result.map((s) => ({
+                    id: s.id,
+                    name: s.name,
+                  })),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("Datenbankfehler:", error);
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Fehler bei der Umfragesuche: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
         };
       }
+    },
+  );
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                status: "success",
-                results: result.map((s) => ({
-                  id: s.id,
-                  name: s.name,
-                })),
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      console.error("Datenbankfehler:", error);
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Fehler bei der Umfragesuche: ${error instanceof Error ? error.message : String(error)}`,
-          },
-        ],
-      };
-    }
-  },
-);
-
-return server;
+  return server;
 };
 
 // Nutze die offizielle Factory-Funktion für die Express App
