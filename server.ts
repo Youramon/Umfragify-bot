@@ -5,10 +5,12 @@ import { McpServer } from "@modelcontextprotocol/server";
 import type { Request, Response } from "express";
 import * as z from "zod";
 import { neon } from "@neondatabase/serverless";
+import { InferenceClient } from "@huggingface/inference";
 
 // Initialisiere die DB-Verbindung außerhalb, damit der Connection-Pool
 // über verschiedene Requests hinweg erhalten bleibt.
 const sql = neon(process.env.DATABASE_URL!);
+const hf = new InferenceClient(process.env.HF_TOKEN);
 
 const getServer = () => {
   // Create an MCP server with implementation details
@@ -278,28 +280,15 @@ const getServer = () => {
     async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse }): Promise<CallToolResult> => {
       try {
         // 1. Vektor via Hugging Face API generieren
+        // 1. Vektor via Hugging Face SDK (InferenceClient) generieren
         let embeddingVector: number[] | null = null;
         try {
-          const response = await fetch(
-            "https://108.138.94.52/models/sentence-transformers/all-MiniLM-L6-v2", // Direkte IP von HF
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${process.env.HF_TOKEN}`,
-                "Content-Type": "application/json",
-                Host: "api-inference.huggingface.co", // Das ist wichtig, damit die IP weiß, welche Domain sie spiegeln soll
-              },
-              body: JSON.stringify({ inputs: rawResponse }), // bzw. inputs: searchQuery bei der Suche
-            }
-          );
-
-          if (response.ok) {
-            embeddingVector = await response.json() as number[];
-          } else {
-            console.error("Hugging Face API Fehler:", response.statusText);
-          }
+          embeddingVector = (await hf.featureExtraction({
+            model: "sentence-transformers/all-MiniLM-L6-v2",
+            inputs: rawResponse,
+          })) as number[];
         } catch (hfError) {
-          console.error("Embedding-Generierung fehlgeschlagen:", hfError);
+          console.error("Embedding-Generierung via SDK fehlgeschlagen:", hfError);
         }
 
         // 2. Transaktion an Neon DB senden
@@ -361,25 +350,11 @@ const getServer = () => {
     },
     async ({ questionId, searchQuery, limit }): Promise<CallToolResult> => {
       try {
-        // Suchbegriff ebenfalls in Vektor umwandeln
-        const hfRes = await fetch(
-          "https://108.138.94.52/models/sentence-transformers/all-MiniLM-L6-v2", // Direkte IP von HF
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.HF_TOKEN}`,
-              "Content-Type": "application/json",
-              Host: "api-inference.huggingface.co", // Das ist wichtig, damit die IP weiß, welche Domain sie spiegeln soll
-            },
-            body: JSON.stringify({ inputs: searchQuery }), // bzw. inputs: searchQuery bei der Suche
-          }
-        );
-
-        if (!hfRes.ok) {
-          throw new Error(`Hugging Face API Error: ${hfRes.statusText}`);
-        }
-
-        const queryEmbedding = await hfRes.json() as number[];
+        // Suchbegriff in Vektor umwandeln via InferenceClient
+        const queryEmbedding = (await hf.featureExtraction({
+          model: "sentence-transformers/all-MiniLM-L6-v2",
+          inputs: searchQuery,
+        })) as number[];
 
         // Vektorsuche in Neon ausführen
         const result = await sql`
