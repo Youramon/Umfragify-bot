@@ -464,6 +464,155 @@ const getServer = () => {
       }
     },
   );
+  server.registerTool(
+    "get-sentiment-analysis",
+    {
+      description: "Gibt eine quantitative Zusammenfassung aller erfassten Sentimente (Stimmungen) inklusive Zählerständen für eine bestimmte Frage zurück.",
+      inputSchema: z.object({
+        questionId: z.number().describe("Die ID der Frage, deren Stimmungsbild analysiert werden soll"),
+      }),
+    },
+    async ({ questionId }): Promise<CallToolResult> => {
+      try {
+        // Wir gruppieren nach dem Sentiment-String und zählen die Vorkommen
+        const result = await sql`
+          SELECT sentiment, COUNT(*)::int as count
+          FROM raw_responses
+          WHERE question_id = ${questionId}
+          GROUP BY sentiment
+          ORDER BY count DESC;
+        `;
+
+        if (result.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "no_data",
+                  message: `Für die Frage ID ${questionId} liegen noch keine Antworten oder Stimmungsbilder vor.`,
+                }),
+              },
+            ],
+          };
+        }
+
+        // Ergebnis schön mappen
+        const summary = result.map((row) => ({
+          sentiment: row.sentiment,
+          count: row.count,
+        }));
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "success",
+                  questionId,
+                  sentimentSummary: summary,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("Fehler bei Sentiment-Auswertung:", error);
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Fehler bei der Sentiment-Analyse: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+  server.registerTool(
+    "get-question-analytics",
+    {
+      description: "Gibt die komplette quantitative Gesamtauswertung für eine Frage zurück: Alle semantischen Kategorien mit ihren Zählerständen UND alle erfassten Stimmungen (Sentimente) mit Zählerständen.",
+      inputSchema: z.object({
+        questionId: z.number().describe("Die ID der Frage, deren Gesamtauswertung abgerufen werden soll"),
+      }),
+    },
+    async ({ questionId }): Promise<CallToolResult> => {
+      try {
+        // Wir führen beide Abfragen parallel aus, um Zeit zu sparen
+        const [categoriesResult, sentimentResult] = await Promise.all([
+          // 1. Kategorien und deren Counter holen
+          sql`
+            SELECT id, label, counter
+            FROM categories
+            WHERE question_id = ${questionId}
+            ORDER BY counter DESC;
+          `,
+          // 2. Sentiment-Verteilung aus den raw_responses aggregieren
+          sql`
+            SELECT sentiment, COUNT(*)::int as count
+            FROM raw_responses
+            WHERE question_id = ${questionId}
+            GROUP BY sentiment
+            ORDER BY count DESC;
+          `
+        ]);
+
+        if (categoriesResult.length === 0 && sentimentResult.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "no_data",
+                  message: `Für die Frage ID ${questionId} liegen noch keine auswertbaren Daten vor.`,
+                }),
+              },
+            ],
+          };
+        }
+
+        // Daten sauber für das LLM strukturieren
+        const analyticsOverview = {
+          status: "success",
+          questionId,
+          categories: categoriesResult.map((c) => ({
+            id: c.id,
+            label: c.label,
+            count: c.counter,
+          })),
+          sentimentSummary: sentimentResult.map((s) => ({
+            sentiment: s.sentiment,
+            count: s.count,
+          })),
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(analyticsOverview, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error("Fehler bei der Gesamtauswertung:", error);
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Fehler bei der Generierung der Gesamtauswertung: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 
   return server;
 };
