@@ -269,17 +269,20 @@ const getServer = () => {
   server.registerTool(
     "sync-answer-analysis",
     {
-      description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an und loggt den Rohtext inklusive semantischem Vektor.",
+      description: "Verarbeitet die KI-Analyse in einem einzigen Schritt: Erhöht bestehende Kategorien, legt neue an, loggt den Rohtext inklusive semantischem Vektor und erfasst optional das Sentiment.",
       inputSchema: z.object({
         questionId: z.number().describe("Die ID der aktuellen Frage"),
         matchedCategoryIds: z.array(z.number()).default([]).describe("IDs bereits existierender Kategorien"),
         newCategoryLabels: z.array(z.string()).default([]).describe("Labels für komplett neue Kategorien"),
-        rawResponse: z.string().describe("Der originale Text des Nutzers")
+        rawResponse: z.string().describe("Der originale Text des Nutzers"),
+        sentiment: z
+          .string()
+          .default("neutral")
+          .describe("Das erkannte Sentiment der Antwort (z.B. 'positiv', 'negativ', 'frustriert', 'zufrieden'). Standard ist 'neutral'."),
       })
     },
-    async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse }): Promise<CallToolResult> => {
+    async ({ questionId, matchedCategoryIds, newCategoryLabels, rawResponse, sentiment }): Promise<CallToolResult> => {
       try {
-        // 1. Vektor via Hugging Face API generieren
         // 1. Vektor via Hugging Face SDK (InferenceClient) generieren
         let embeddingVector: number[] | null = null;
         try {
@@ -295,14 +298,16 @@ const getServer = () => {
         await sql.transaction((tx) => {
           const queries = [];
 
-          // Rohtext MIT Vektor loggen (falls Vektor-Generierung erfolgreich war)
+          // Rohtext MIT Vektor und Sentiment loggen
           if (embeddingVector) {
             queries.push(
-              tx`INSERT INTO raw_responses (question_id, text, embedding) VALUES (${questionId}, ${rawResponse}, ${JSON.stringify(embeddingVector)}::vector)`
+              tx`INSERT INTO raw_responses (question_id, text, embedding, sentiment) 
+                 VALUES (${questionId}, ${rawResponse}, ${JSON.stringify(embeddingVector)}::vector, ${sentiment})`
             );
           } else {
             queries.push(
-              tx`INSERT INTO raw_responses (question_id, text) VALUES (${questionId}, ${rawResponse})`
+              tx`INSERT INTO raw_responses (question_id, text, sentiment) 
+                 VALUES (${questionId}, ${rawResponse}, ${sentiment})`
             );
           }
 
@@ -329,7 +334,7 @@ const getServer = () => {
         });
 
         return {
-          content: [{ type: "text", text: JSON.stringify({ status: "success", message: "Analyse und Embedding erfolgreich synchronisiert." }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ status: "success", message: "Analyse, Embedding und Sentiment erfolgreich synchronisiert." }, null, 2) }],
         };
       } catch (error) {
         return { isError: true, content: [{ type: "text", text: String(error) }] };
